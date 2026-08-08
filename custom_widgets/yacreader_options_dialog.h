@@ -7,7 +7,7 @@ class YACReader3DFlowConfigWidget;
 class QCheckBox;
 class QPushButton;
 class QSettings;
-class QGroupBox;
+class QVBoxLayout;
 
 class YACReaderOptionsDialog : public QDialog
 {
@@ -18,10 +18,13 @@ protected:
     QPushButton *accept;
     QPushButton *cancel;
 
-    QGroupBox *shortcutsBox;
+    QWidget *shortcutsPage;
+    QVBoxLayout *shortcutsLayout;
 
     QSettings *settings;
     QSettings *previousSettings;
+
+    void addShortcutsSection(QWidget *section);
 
 public:
     YACReaderOptionsDialog(QWidget *parent);

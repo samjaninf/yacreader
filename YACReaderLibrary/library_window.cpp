@@ -41,6 +41,7 @@
 #include "api_key_dialog.h"
 #include "comic_db.h"
 #include "comic_files_manager.h"
+#include "comic_info_repairer.h"
 #include "comic_model.h"
 #include "comic_vine_dialog.h"
 #include "comics_remover.h"
@@ -69,6 +70,7 @@
 #include "reading_list_model.h"
 #include "recent_visibility_coordinator.h"
 #include "rename_library_dialog.h"
+#include "search_syntax_dialog.h"
 #include "server_config_dialog.h"
 #include "shortcuts_manager.h"
 #include "static.h"
@@ -214,6 +216,7 @@ void LibraryWindow::setupUI()
     libraryCreator = new LibraryCreator(settings);
     packageManager = new PackageManager();
     xmlInfoLibraryScanner = new XMLInfoLibraryScanner();
+    comicInfoRepairer = new ComicInfoRepairer(settings);
 
     historyController = new YACReaderHistoryController(this);
 
@@ -498,6 +501,13 @@ void LibraryWindow::createToolBars()
     libraryToolBar->setSearchWidget(searchEdit);
 #endif
 
+    auto *searchMenu = createSearchMenu();
+#ifdef Y_MAC_UI
+    libraryToolBar->setSearchMenu(searchMenu);
+#else
+    searchEdit->setSearchMenu(searchMenu);
+#endif
+
     editInfoToolBar->setIconSize(QSize(18, 18));
     editInfoToolBar->addAction(actions.openComicAction);
     editInfoToolBar->addSeparator();
@@ -538,6 +548,94 @@ void LibraryWindow::createToolBars()
     editInfoToolBar->addAction(actions.toogleShowRecentIndicatorAction);
 
     contentViewsManager->comicsView->setToolBar(editInfoToolBar);
+}
+
+QMenu *LibraryWindow::createSearchMenu()
+{
+    auto *menu = new QMenu(tr("Search filters"), this);
+    menu->setMinimumWidth(190);
+
+    auto addFilter = [this, menu](const QString &label, const QString &query) {
+        auto *action = menu->addAction(label);
+        connect(action, &QAction::triggered, this, [this, query] {
+            applySearchQuery(query);
+        });
+    };
+
+    addFilter(tr("Unread"), QStringLiteral("read:false"));
+    addFilter(
+            tr("In progress"),
+            QStringLiteral("hasBeenOpened:true AND read:false"));
+    addFilter(tr("Highly rated"), QStringLiteral("rating>=4"));
+
+    auto *recentlyAdded = menu->addAction(tr("Recently added"));
+    connect(recentlyAdded, &QAction::triggered, this, [this] {
+        const int days = settings->value(NUM_DAYS_TO_CONSIDER_RECENT, 1).toInt();
+        applySearchQuery(QStringLiteral("added>%1").arg(days));
+    });
+
+    menu->addSeparator();
+    auto *syntaxAction = menu->addAction(tr("Search syntax…"));
+    connect(syntaxAction, &QAction::triggered, this, &LibraryWindow::showSearchSyntax);
+
+    return menu;
+}
+
+void LibraryWindow::applySearchQuery(const QString &query)
+{
+#ifdef Y_MAC_UI
+    libraryToolBar->setSearchText(query);
+    libraryToolBar->focusSearch();
+#else
+    searchEdit->setText(query);
+    searchEdit->setFocus(Qt::ShortcutFocusReason);
+#endif
+}
+
+void LibraryWindow::setSearchInputEnabled(bool enabled)
+{
+#ifdef Y_MAC_UI
+    libraryToolBar->setSearchEnabled(enabled);
+#else
+    searchEdit->setEnabled(enabled);
+#endif
+}
+
+void LibraryWindow::clearSearchInput(bool notify)
+{
+#ifdef Y_MAC_UI
+    libraryToolBar->clearSearchText(notify);
+#else
+    if (notify)
+        searchEdit->clear();
+    else
+        searchEdit->clearText();
+#endif
+}
+
+void LibraryWindow::focusSearchInput()
+{
+#ifdef Y_MAC_UI
+    libraryToolBar->focusSearch();
+#else
+    searchEdit->setFocus(Qt::ShortcutFocusReason);
+#endif
+}
+
+QString LibraryWindow::searchText() const
+{
+#ifdef Y_MAC_UI
+    return libraryToolBar->searchText();
+#else
+    return searchEdit->text();
+#endif
+}
+
+void LibraryWindow::showSearchSyntax()
+{
+    auto *dialog = new SearchSyntaxDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->open();
 }
 
 void LibraryWindow::createMenus()
@@ -642,6 +740,11 @@ void LibraryWindow::createMenus()
     typeMenu->addAction(setYonkomaAction);
 
     selectedLibrary->addAction(actions.rescanLibraryForXMLInfoAction);
+    selectedLibrary->addAction(actions.repairLibraryAction);
+    YACReader::addSperator(selectedLibrary);
+
+    selectedLibrary->addAction(actions.backupLibraryAction);
+    selectedLibrary->addAction(actions.restoreLibraryAction);
     YACReader::addSperator(selectedLibrary);
 
     selectedLibrary->addAction(actions.exportComicsInfoAction);
@@ -652,6 +755,7 @@ void LibraryWindow::createMenus()
     selectedLibrary->addAction(actions.importLibraryAction);
     YACReader::addSperator(selectedLibrary);
 
+    selectedLibrary->addAction(actions.openLibraryFolderAction);
     selectedLibrary->addAction(actions.showLibraryInfo);
 
 // MacOSX app menus
@@ -672,6 +776,11 @@ void LibraryWindow::createMenus()
     libraryMenu->addSeparator();
 
     libraryMenu->addAction(actions.rescanLibraryForXMLInfoAction);
+    libraryMenu->addAction(actions.repairLibraryAction);
+    libraryMenu->addSeparator();
+
+    libraryMenu->addAction(actions.backupLibraryAction);
+    libraryMenu->addAction(actions.restoreLibraryAction);
     libraryMenu->addSeparator();
 
     libraryMenu->addAction(actions.exportComicsInfoAction);
@@ -684,6 +793,7 @@ void LibraryWindow::createMenus()
 
     libraryMenu->addSeparator();
 
+    libraryMenu->addAction(actions.openLibraryFolderAction);
     libraryMenu->addAction(actions.showLibraryInfo);
 
     // folder
@@ -733,7 +843,7 @@ void LibraryWindow::createConnections()
             optionsDialog,
             serverConfigDialog,
             recentVisibilityCoordinator);
-    QObject::connect(actions.focusSearchLineAction, &QAction::triggered, searchEdit, [this] { searchEdit->setFocus(Qt::ShortcutFocusReason); });
+    connect(actions.focusSearchLineAction, &QAction::triggered, this, &LibraryWindow::focusSearchInput);
 
     // libraryCreator connections
     connect(createLibraryDialog, &CreateLibraryDialog::createLibrary, this, QOverload<QString, QString, QString>::of(&LibraryWindow::create));
@@ -749,15 +859,80 @@ void LibraryWindow::createConnections()
     connect(libraryCreator, &LibraryCreator::comicAdded, importWidget, &ImportWidget::newComic);
     // libraryCreator errors
     connect(libraryCreator, &LibraryCreator::failedCreatingDB, this, &LibraryWindow::manageCreatingError);
-    // connect(libraryCreator, SIGNAL(failedUpdatingDB(QString)), this, SLOT(manageUpdatingError(QString))); // TODO: implement failedUpdatingDB
+    connect(libraryCreator, &LibraryCreator::failedOpeningDB, this, [this](const QString &error) {
+        showRootWidget();
+        const auto libraryName = selectedLibrary->currentText();
+        const auto libraryPath = libraries.getPath(libraryName);
+        if (!libraryPath.isEmpty() && QFile::exists(LibraryPaths::libraryDatabasePath(libraryPath)) && !DataBaseManagement::isLibraryDatabaseValid(libraryPath)) {
+            offerDatabaseRecovery(libraryName);
+            return;
+        }
+        manageUpdatingError(error);
+    });
 
     connect(xmlInfoLibraryScanner, &QThread::finished, this, &LibraryWindow::showRootWidget);
     connect(xmlInfoLibraryScanner, &QThread::finished, this, &LibraryWindow::reloadCurrentFolderComicsContent);
     connect(xmlInfoLibraryScanner, &XMLInfoLibraryScanner::comicScanned, importWidget, &ImportWidget::newComic);
 
+    connect(comicInfoRepairer, &QThread::finished, this, [this]() {
+        const auto summary = comicInfoRepairer->summary();
+        showRootWidget();
+        reloadCurrentLibrary();
+
+        if (summary.lockedByAnotherProcess) {
+            if (summary.lockHolderIsRunningLocally) {
+                QMessageBox::information(this,
+                                         actions.repairLibraryAction->text(),
+                                         tr("A repair of this library is already running (%1). Wait for it to finish.").arg(summary.lockHolderInfo));
+                return;
+            }
+
+            auto text = summary.lockHolderInfo.isEmpty()
+                    ? tr("The library is locked by a repair that did not finish.")
+                    : tr("The library is locked by a repair started by %1.").arg(summary.lockHolderInfo);
+            text += "\n\n";
+            text += tr("If you are sure that no other repair is running, the lock can be removed. Remove the lock and continue?");
+
+            const auto answer = QMessageBox::question(this,
+                                                      actions.repairLibraryAction->text(),
+                                                      text,
+                                                      QMessageBox::Yes | QMessageBox::No,
+                                                      QMessageBox::No);
+            if (answer == QMessageBox::Yes) {
+                startLibraryRepair(true);
+            }
+            return;
+        }
+
+        if (summary.canceled || !summary.error.isEmpty()) {
+            return;
+        }
+
+        QMessageBox messageBox(QMessageBox::Information,
+                               actions.repairLibraryAction->text(),
+                               tr("Repaired: %1\nFailed: %2\nMissing files: %3").arg(summary.repaired).arg(summary.failed).arg(summary.missingFiles),
+                               QMessageBox::Ok,
+                               this);
+        if (!summary.failedFilePaths.isEmpty()) {
+            messageBox.setDetailedText(summary.failedFilePaths.join('\n'));
+        }
+        messageBox.exec();
+    });
+    connect(comicInfoRepairer, &ComicInfoRepairer::comicProcessed, importWidget, &ImportWidget::newComic);
+    connect(comicInfoRepairer, &ComicInfoRepairer::failed, this, [this](const QString &error) {
+        const auto libraryName = selectedLibrary->currentText();
+        const auto libraryPath = libraries.getPath(libraryName);
+        if (!libraryPath.isEmpty() && QFile::exists(LibraryPaths::libraryDatabasePath(libraryPath)) && !DataBaseManagement::isLibraryDatabaseValid(libraryPath)) {
+            offerDatabaseRecovery(libraryName);
+            return;
+        }
+        QMessageBox::critical(this, actions.repairLibraryAction->text(), error);
+    });
+
     // new import widget
     connect(importWidget, &ImportWidget::stop, this, &LibraryWindow::stopLibraryCreator);
     connect(importWidget, &ImportWidget::stop, this, &LibraryWindow::stopXMLScanning);
+    connect(importWidget, &ImportWidget::stop, this, &LibraryWindow::stopComicInfoRepair);
 
     // packageManager connections
     connect(exportLibraryDialog, &ExportLibraryDialog::exportPath, this, &LibraryWindow::exportLibrary);
@@ -769,6 +944,9 @@ void LibraryWindow::createConnections()
     connect(importLibraryDialog, &ImportLibraryDialog::libraryExists, this, &LibraryWindow::libraryAlreadyExists);
     connect(packageManager, &PackageManager::imported, importLibraryDialog, &QWidget::hide);
     connect(packageManager, &PackageManager::imported, this, &LibraryWindow::openLastCreated);
+    connect(packageManager, &PackageManager::failed, this, [this](const QString &error) {
+        QMessageBox::critical(this, tr("Package operation failed"), error.isEmpty() ? tr("The covers package operation could not be completed.") : error);
+    });
 
     // create and update dialogs
     connect(createLibraryDialog, &CreateLibraryDialog::cancelCreate, this, &LibraryWindow::cancelCreating);
@@ -853,6 +1031,11 @@ void LibraryWindow::loadLibrary(const QString &name)
 
         showRootWidget();
         QString rootPath = libraries.getPath(name);
+        QString recoveryError;
+        if (!DataBaseManagement::recoverInterruptedRestore(rootPath, &recoveryError)) {
+            QMessageBox::critical(this, tr("Restore recovery failed"), recoveryError);
+            return;
+        }
         QString path = LibraryPaths::libraryDataPath(rootPath);
         QString customFolderCoversPath = LibraryPaths::libraryCustomFoldersCoverPath(rootPath);
         QString databasePath = LibraryPaths::libraryDatabasePath(rootPath);
@@ -866,6 +1049,20 @@ void LibraryWindow::loadLibrary(const QString &name)
             int comparation = DataBaseManagement::compareVersions(dbVersion, DB_VERSION);
 
             if (comparation < 0) {
+                // a database that fails validation would block the upgrade backup and
+                // trap the user in the update-needed/upgrade-failed dialog cycle;
+                // offer recovery instead of the upgrade question
+                if (!DataBaseManagement::isLibraryDatabaseValid(rootPath)) {
+                    contentViewsManager->comicsView->setModel(NULL);
+                    foldersView->setModel(NULL);
+                    listsView->setModel(NULL);
+                    actions.disableAllActions();
+                    actions.renameLibraryAction->setEnabled(true);
+                    actions.removeLibraryAction->setEnabled(true);
+                    actions.restoreLibraryAction->setEnabled(true);
+                    offerDatabaseRecovery(name);
+                    return;
+                }
                 int ret = QMessageBox::question(this, tr("Update needed"), tr("This library was created with a previous version of YACReaderLibrary. It needs to be updated. Update now?"), QMessageBox::Yes, QMessageBox::No);
                 if (ret == QMessageBox::Yes) {
                     importWidget->setUpgradeLook();
@@ -889,6 +1086,7 @@ void LibraryWindow::loadLibrary(const QString &name)
                     // será possible renombrar y borrar estas bibliotecas
                     actions.renameLibraryAction->setEnabled(true);
                     actions.removeLibraryAction->setEnabled(true);
+                    actions.restoreLibraryAction->setEnabled(true);
                 }
             }
 
@@ -914,6 +1112,7 @@ void LibraryWindow::loadLibrary(const QString &name)
                 {
                     actions.disableLibrariesActions(false);
                     actions.updateLibraryAction->setDisabled(true);
+                    actions.repairLibraryAction->setDisabled(true);
                     actions.openContainingFolderAction->setDisabled(true);
                     actions.rescanLibraryForXMLInfoAction->setDisabled(true);
 
@@ -931,7 +1130,7 @@ void LibraryWindow::loadLibrary(const QString &name)
 
                 setRootIndex();
 
-                searchEdit->clear();
+                clearSearchInput(true);
             } else if (comparation > 0) {
                 int ret = QMessageBox::question(this, tr("Download new version"), tr("This library was created with a newer version of YACReaderLibrary. Download the new version now?"), QMessageBox::Yes, QMessageBox::No);
                 if (ret == QMessageBox::Yes)
@@ -944,6 +1143,7 @@ void LibraryWindow::loadLibrary(const QString &name)
                 // será possible renombrar y borrar estas bibliotecas
                 actions.renameLibraryAction->setEnabled(true);
                 actions.removeLibraryAction->setEnabled(true);
+                actions.restoreLibraryAction->setEnabled(true);
             }
         } else {
             contentViewsManager->comicsView->setModel(NULL);
@@ -960,6 +1160,7 @@ void LibraryWindow::loadLibrary(const QString &name)
                 // será possible renombrar y borrar estas bibliotecas
                 actions.renameLibraryAction->setEnabled(true);
                 actions.removeLibraryAction->setEnabled(true);
+                actions.restoreLibraryAction->setEnabled(true);
 
             } else // si existe el path, puede ser que la librería sea alguna versión pre-5.0 ó que esté corrupta o que no haya drivers sql
             {
@@ -970,17 +1171,17 @@ void LibraryWindow::loadLibrary(const QString &name)
                     // será possible renombrar y borrar estas bibliotecas
                     actions.renameLibraryAction->setEnabled(true);
                     actions.removeLibraryAction->setEnabled(true);
+                    actions.restoreLibraryAction->setEnabled(true);
                 } else {
                     QString currentLibrary = selectedLibrary->currentText();
                     QString path = libraries.getPath(selectedLibrary->currentText());
                     if (QMessageBox::question(this, tr("Old library"), tr("Library '%1' has been created with an older version of YACReaderLibrary. It must be created again. Do you want to create the library now?").arg(currentLibrary), QMessageBox::Yes, QMessageBox::No) == QMessageBox::Yes) {
-                        QDir d(LibraryPaths::libraryDataPath(path));
-                        d.removeRecursively();
                         createLibraryDialog->setDataAndStart(currentLibrary, path);
                     }
                     // será possible renombrar y borrar estas bibliotecas
                     actions.renameLibraryAction->setEnabled(true);
                     actions.removeLibraryAction->setEnabled(true);
+                    actions.restoreLibraryAction->setEnabled(true);
                 }
             }
         }
@@ -1879,12 +2080,256 @@ void LibraryWindow::updateLibrary()
     libraryCreator->start();
 }
 
+void LibraryWindow::backupLibrary()
+{
+    const auto path = libraries.getPath(selectedLibrary->currentText());
+    if (path.isEmpty())
+        return;
+
+    auto version = DataBaseManagement::checkValidDB(LibraryPaths::libraryDatabasePath(path));
+    if (version.isEmpty())
+        version = "unknown";
+    const auto suggestedName = QString("library-%1-db-%2-manual.ydb")
+                                       .arg(QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"), version);
+    const auto destination = QFileDialog::getSaveFileName(this,
+                                                          actions.backupLibraryAction->text(),
+                                                          QDir::home().filePath(suggestedName),
+                                                          tr("YACReader library database (*.ydb)"));
+    if (destination.isEmpty())
+        return;
+
+    struct BackupResult {
+        bool success { false };
+        QString error;
+    };
+
+    auto result = std::make_shared<BackupResult>();
+    auto worker = QThread::create([path, destination, result] {
+        result->success = DataBaseManagement::backupLibrary(path, DatabaseBackupReason::Manual, &result->error, destination);
+    });
+
+    actions.backupLibraryAction->setDisabled(true);
+    connect(worker, &QThread::finished, this, [this, destination, result] {
+        actions.backupLibraryAction->setDisabled(false);
+        if (result->success) {
+            QMessageBox::information(this,
+                                     actions.backupLibraryAction->text(),
+                                     tr("The library database backup was created at:\n%1").arg(destination));
+        } else {
+            QMessageBox::critical(this,
+                                  actions.backupLibraryAction->text(),
+                                  tr("Unable to create the library database backup:\n%1").arg(result->error));
+        }
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
+}
+
+void LibraryWindow::restoreLibrary()
+{
+    const auto libraryPath = libraries.getPath(selectedLibrary->currentText());
+    if (libraryPath.isEmpty())
+        return;
+
+    const auto backupPath = QFileDialog::getOpenFileName(this,
+                                                         actions.restoreLibraryAction->text(),
+                                                         QDir(LibraryPaths::libraryDataPath(libraryPath)).filePath("backups"),
+                                                         tr("YACReader library database (*.ydb)"));
+    if (backupPath.isEmpty())
+        return;
+
+    const auto answer = QMessageBox::warning(this,
+                                             actions.restoreLibraryAction->text(),
+                                             tr("Close YACReaderLibraryServer and any other YACReader application using this library before restoring. Continue?"),
+                                             QMessageBox::Yes | QMessageBox::Cancel,
+                                             QMessageBox::Cancel);
+    if (answer == QMessageBox::Yes)
+        startLibraryRestore(backupPath);
+}
+
+void LibraryWindow::startLibraryRestore(const QString &backupPath, bool allowInvalidCurrent, bool removeStaleLock)
+{
+    const auto libraryName = selectedLibrary->currentText();
+    const auto libraryPath = libraries.getPath(libraryName);
+    auto result = std::make_shared<DatabaseRestoreResult>();
+    auto progress = new QProgressDialog(tr("Restoring library database..."), QString(), 0, 0, this);
+    progress->setCancelButton(nullptr);
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setMinimumDuration(0);
+
+    contentViewsManager->comicsView->setModel(nullptr);
+    foldersView->setModel(nullptr);
+    listsView->setModel(nullptr);
+    actions.disableAllActions();
+
+    auto worker = QThread::create([libraryPath, backupPath, allowInvalidCurrent, removeStaleLock, result] {
+        *result = DataBaseManagement::restoreLibrary(libraryPath, backupPath, allowInvalidCurrent, removeStaleLock);
+    });
+    connect(worker, &QThread::finished, this, [this, libraryName, backupPath, allowInvalidCurrent, result, progress] {
+        progress->deleteLater();
+
+        if (result->status == DatabaseRestoreStatus::InvalidCurrentDatabase && !allowInvalidCurrent) {
+            const auto answer = QMessageBox::warning(this,
+                                                     actions.restoreLibraryAction->text(),
+                                                     tr("The current library database is invalid. Restore the selected backup anyway?"),
+                                                     QMessageBox::Yes | QMessageBox::Cancel,
+                                                     QMessageBox::Cancel);
+            if (answer == QMessageBox::Yes) {
+                startLibraryRestore(backupPath, true);
+                return;
+            }
+            actions.renameLibraryAction->setEnabled(true);
+            actions.removeLibraryAction->setEnabled(true);
+            actions.restoreLibraryAction->setEnabled(true);
+            return;
+        } else if (result->status == DatabaseRestoreStatus::LockFailed && !result->lockHolderIsRunningLocally) {
+            const auto answer = QMessageBox::warning(this,
+                                                     actions.restoreLibraryAction->text(),
+                                                     tr("The library maintenance lock may be stale. Remove it and retry?"),
+                                                     QMessageBox::Yes | QMessageBox::Cancel,
+                                                     QMessageBox::Cancel);
+            if (answer == QMessageBox::Yes) {
+                startLibraryRestore(backupPath, allowInvalidCurrent, true);
+                return;
+            }
+            loadLibrary(libraryName);
+            return;
+        }
+
+        if (!result->success()) {
+            auto error = result->error;
+            if (result->status == DatabaseRestoreStatus::RollbackFailed)
+                error += tr("\n\nRestart YACReaderLibrary before attempting recovery again.");
+            QMessageBox::critical(this, actions.restoreLibraryAction->text(), error);
+            if (result->status != DatabaseRestoreStatus::RollbackFailed) {
+                loadLibrary(libraryName);
+            } else {
+                actions.restoreLibraryAction->setEnabled(true);
+                actions.removeLibraryAction->setEnabled(true);
+            }
+            return;
+        }
+
+        loadLibrary(libraryName);
+        const auto answer = QMessageBox::question(this,
+                                                  actions.restoreLibraryAction->text(),
+                                                  tr("The library database was restored successfully. Update the library now?"),
+                                                  QMessageBox::Yes | QMessageBox::No,
+                                                  QMessageBox::Yes);
+        if (answer == QMessageBox::Yes)
+            updateLibrary();
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
+}
+
+void LibraryWindow::offerDatabaseRecovery(const QString &libraryName)
+{
+    QMessageBox messageBox(QMessageBox::Warning,
+                           tr("Library database damaged"),
+                           tr("The database of library '%1' is damaged, so normal updates, maintenance, and backups are unavailable. YACReader can attempt to repair the database. Some damaged data may not be recoverable. Existing backups will not be changed.").arg(libraryName),
+                           QMessageBox::NoButton,
+                           this);
+    const auto repairButton = messageBox.addButton(tr("Attempt repair"), QMessageBox::AcceptRole);
+    const auto restoreButton = messageBox.addButton(tr("Restore a backup..."), QMessageBox::ActionRole);
+    messageBox.addButton(QMessageBox::Cancel);
+    messageBox.setWindowModality(Qt::WindowModal);
+    messageBox.exec();
+
+    if (messageBox.clickedButton() == repairButton)
+        startDatabaseSalvage(libraryName);
+    else if (messageBox.clickedButton() == restoreButton)
+        restoreLibrary();
+}
+
+void LibraryWindow::startDatabaseSalvage(const QString &libraryName, bool removeStaleLock)
+{
+    const auto libraryPath = libraries.getPath(libraryName);
+    if (libraryPath.isEmpty())
+        return;
+
+    auto result = std::make_shared<DatabaseSalvageResult>();
+    auto progress = new QProgressDialog(tr("Repairing library database..."), QString(), 0, 0, this);
+    progress->setCancelButton(nullptr);
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setMinimumDuration(0);
+
+    auto worker = QThread::create([libraryPath, removeStaleLock, result] {
+        *result = DataBaseManagement::salvageLibrary(libraryPath, removeStaleLock);
+    });
+    connect(worker, &QThread::finished, this, [this, libraryName, result, progress] {
+        progress->deleteLater();
+
+        if (result->status == DatabaseSalvageStatus::LockFailed) {
+            if (!result->lockHolderIsRunningLocally) {
+                const auto answer = QMessageBox::warning(this,
+                                                         tr("Library database repair"),
+                                                         tr("The library maintenance lock may be stale. Remove it and retry?"),
+                                                         QMessageBox::Yes | QMessageBox::Cancel,
+                                                         QMessageBox::Cancel);
+                if (answer == QMessageBox::Yes)
+                    startDatabaseSalvage(libraryName, true);
+            } else {
+                QMessageBox::warning(this,
+                                     tr("Library database repair"),
+                                     tr("Another maintenance operation is currently using this library. Try again after it finishes."));
+            }
+            return;
+        }
+
+        if (result->success()) {
+            loadLibrary(libraryName);
+            if (result->status == DatabaseSalvageStatus::AlreadyValid) {
+                QMessageBox::information(this,
+                                         tr("Library database repair"),
+                                         tr("The library database is already valid."));
+            } else if (result->status == DatabaseSalvageStatus::Reindexed) {
+                QMessageBox::information(this,
+                                         tr("Library database repaired"),
+                                         tr("The library database was repaired by rebuilding its indexes. The damaged original was preserved at:\n%1").arg(result->preservedDatabasePath));
+            } else {
+                const auto answer = QMessageBox::question(this,
+                                                          tr("Library database rebuilt"),
+                                                          tr("The library database was rebuilt successfully. The damaged original was preserved at:\n%1\n\nUpdate the library now?").arg(result->preservedDatabasePath),
+                                                          QMessageBox::Yes | QMessageBox::No,
+                                                          QMessageBox::Yes);
+                if (answer == QMessageBox::Yes)
+                    updateLibrary();
+            }
+        } else {
+            auto recovery = result->preservedDatabasePath.isEmpty()
+                    ? QString()
+                    : tr("\n\nThe damaged original was preserved at:\n%1").arg(result->preservedDatabasePath);
+            QMessageBox::critical(this,
+                                  tr("Library database repair failed"),
+                                  tr("The library database could not be repaired:\n%1%2\n\nYou can restore a backup from the Library menu or recreate the library.").arg(result->error, recovery));
+            actions.restoreLibraryAction->setEnabled(true);
+        }
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
+}
+
+void LibraryWindow::repairLibrary()
+{
+    startLibraryRepair(false);
+}
+
+void LibraryWindow::startLibraryRepair(bool removeStaleLock)
+{
+    importWidget->setRepairLook();
+    showImportingWidget();
+
+    const auto path = libraries.getPath(selectedLibrary->currentText());
+    comicInfoRepairer->repairLibrary(path, LibraryPaths::libraryDataPath(path), removeStaleLock);
+}
+
 void LibraryWindow::deleteCurrentLibrary()
 {
     QString path = libraries.getPath(selectedLibrary->currentText());
     libraries.remove(selectedLibrary->currentText());
     selectedLibrary->removeItem(selectedLibrary->currentIndex());
-    path = LibraryPaths::libraryDatabasePath(path);
+    path = LibraryPaths::libraryDataPath(path);
 
     QDir d(path);
     d.removeRecursively();
@@ -1908,7 +2353,7 @@ void LibraryWindow::removeLibrary()
                                               tr("Do you want remove ") + currentLibrary + tr(" library?"),
                                               QMessageBox::Yes | QMessageBox::YesToAll | QMessageBox::No,
                                               this);
-    messageBox->button(QMessageBox::YesToAll)->setText(tr("Remove and delete metadata"));
+    messageBox->button(QMessageBox::YesToAll)->setText(tr("Remove and delete metadata and backups"));
     messageBox->setWindowModality(Qt::WindowModal);
     int ret = messageBox->exec();
     if (ret == QMessageBox::Yes) {
@@ -1987,6 +2432,13 @@ void LibraryWindow::showLibraryInfo()
     msgBox.exec();
 }
 
+void LibraryWindow::openLibraryFolder()
+{
+    const auto path = libraries.getPath(selectedLibrary->currentText());
+    if (!path.isEmpty())
+        QDesktopServices::openUrl(QUrl::fromLocalFile(QDir::cleanPath(path)));
+}
+
 void LibraryWindow::rescanCurrentFolderForXMLInfo()
 {
     rescanFolderForXMLInfo(getCurrentFolderIndex());
@@ -2019,6 +2471,12 @@ void LibraryWindow::stopXMLScanning()
 {
     xmlInfoLibraryScanner->stop();
     xmlInfoLibraryScanner->wait();
+}
+
+void LibraryWindow::stopComicInfoRepair()
+{
+    comicInfoRepairer->stop();
+    comicInfoRepairer->wait();
 }
 
 void LibraryWindow::setRootIndex()
@@ -2236,17 +2694,12 @@ void LibraryWindow::openContainingFolderComic()
 #endif
 
 #ifdef Q_OS_MACOS
-    QString filePath = file.absoluteFilePath();
+    // `open -R` reveals and selects the file in Finder without sending an Apple
+    // Event, so it doesn't trigger the macOS automation permission prompt.
     QStringList args;
-    args << "-e";
-    args << "tell application \"Finder\"";
-    args << "-e";
-    args << "activate";
-    args << "-e";
-    args << "select POSIX file \"" + filePath + "\"";
-    args << "-e";
-    args << "end tell";
-    QProcess::startDetached("osascript", args);
+    args << "-R";
+    args << file.absoluteFilePath();
+    QProcess::startDetached("open", args);
 #endif
 
 #ifdef Q_OS_WIN
@@ -2390,7 +2843,7 @@ void LibraryWindow::showExportComicsInfo()
 
 void LibraryWindow::showImportComicsInfo()
 {
-    importComicsInfoDialog->dest = currentPath() + LibraryPaths::libraryDatabasePath(currentPath());
+    importComicsInfoDialog->dest = LibraryPaths::libraryDatabasePath(currentPath());
     importComicsInfoDialog->open();
 }
 
@@ -2408,6 +2861,7 @@ void LibraryWindow::prepareToCloseApp()
 
     libraryCreator->stop();
     librariesUpdateCoordinator->stop();
+    stopComicInfoRepair();
 
     settings->setValue(MAIN_WINDOW_GEOMETRY, saveGeometry());
     settings->setValue(MAIN_WINDOW_STATE, saveState());
@@ -2428,7 +2882,7 @@ void LibraryWindow::closeApp()
 void LibraryWindow::showNoLibrariesWidget()
 {
     actions.disableAllActions();
-    searchEdit->setDisabled(true);
+    setSearchInputEnabled(false);
     mainWidget->setCurrentIndex(1);
 }
 
@@ -2437,7 +2891,7 @@ void LibraryWindow::showRootWidget()
 #ifndef Y_MAC_UI
     libraryToolBar->setDisabled(false);
 #endif
-    searchEdit->setEnabled(true);
+    setSearchInputEnabled(true);
     mainWidget->setCurrentIndex(0);
 }
 
@@ -2448,7 +2902,7 @@ void LibraryWindow::showImportingWidget()
 #ifndef Y_MAC_UI
     libraryToolBar->setDisabled(true);
 #endif
-    searchEdit->setDisabled(true);
+    setSearchInputEnabled(false);
     mainWidget->setCurrentIndex(2);
 }
 
@@ -2703,7 +3157,7 @@ bool LibraryWindow::exitSearchMode()
 {
     if (status != LibraryWindow::Searching)
         return false;
-    searchEdit->clearText();
+    clearSearchInput(false);
     clearSearchFilter();
     return true;
 }

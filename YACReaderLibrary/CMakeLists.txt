@@ -10,6 +10,8 @@ add_library(library_common STATIC
     bundle_creator.cpp
     initial_comic_info_extractor.h
     initial_comic_info_extractor.cpp
+    comic_info_repairer.h
+    comic_info_repairer.cpp
     xml_info_parser.h
     xml_info_parser.cpp
     xml_info_library_scanner.h
@@ -54,6 +56,8 @@ add_library(db_helper STATIC
     db/reading_list.cpp
     db/query_lexer.h
     db/query_lexer.cpp
+    db/search_field_registry.h
+    db/search_field_registry.cpp
     db/query_parser.h
     db/query_parser.cpp
     db/search_query.h
@@ -92,6 +96,8 @@ qt_add_executable(YACReaderLibrary WIN32
     properties_dialog.cpp
     options_dialog.h
     options_dialog.cpp
+    search_syntax_dialog.h
+    search_syntax_dialog.cpp
     export_library_dialog.h
     export_library_dialog.cpp
     import_library_dialog.h
@@ -204,6 +210,7 @@ target_compile_definitions(YACReaderLibrary PRIVATE
 
 # Resources
 set(yacreaderlibrary_image_files
+    ${PROJECT_SOURCE_DIR}/images/chevronDown.svg
     ${PROJECT_SOURCE_DIR}/images/shortcuts/accept_shortcut.svg
     ${PROJECT_SOURCE_DIR}/images/shortcuts/clear_shortcut.svg
     ${PROJECT_SOURCE_DIR}/images/comic_vine/downArrow.svg

@@ -6,6 +6,7 @@
 #include "theme_factory.h"
 #include "theme_manager.h"
 #include "yacreader_3d_flow_config_widget.h"
+#include "yacreader_settings_widget.h"
 #include "yacreader_spin_slider_widget.h"
 
 #include <QCheckBox>
@@ -20,13 +21,12 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSlider>
-#include <QTabWidget>
 #include <QVBoxLayout>
 
 OptionsDialog::OptionsDialog(QWidget *parent)
     : YACReaderOptionsDialog(parent)
 {
-    auto tabWidget = new QTabWidget();
+    auto settingsWidget = new YACReaderSettingsWidget();
 
     auto layout = new QVBoxLayout(this);
 
@@ -60,6 +60,18 @@ OptionsDialog::OptionsDialog(QWidget *parent)
     showTimeInInformationLabel = new QCheckBox(tr("Show time in current page information label"));
     displayLayout->addWidget(showTimeInInformationLabel);
     displayBox->setLayout(displayLayout);
+
+    QGroupBox *magnifyingGlassBox = new QGroupBox(tr("Magnifying glass"));
+    auto magnifyingGlassLayout = new QVBoxLayout();
+    circularMagnifyingGlass = new QCheckBox(tr("Circular magnifying glass"));
+    magnifyingGlassRing = new QCheckBox(tr("Draw a ring around the circular magnifying glass"));
+    // The ring only applies to the circular loupe, so it is enabled only when circular is on.
+    connect(circularMagnifyingGlass, &QCheckBox::toggled, magnifyingGlassRing, &QWidget::setEnabled);
+    magnifyingGlassEdgeEase = new QCheckBox(tr("Ease cursor movement toward the edges"));
+    magnifyingGlassLayout->addWidget(circularMagnifyingGlass);
+    magnifyingGlassLayout->addWidget(magnifyingGlassRing);
+    magnifyingGlassLayout->addWidget(magnifyingGlassEdgeEase);
+    magnifyingGlassBox->setLayout(magnifyingGlassLayout);
 
     connect(pathFindButton, &QAbstractButton::clicked, this, &OptionsDialog::findFolder);
 
@@ -119,15 +131,39 @@ OptionsDialog::OptionsDialog(QWidget *parent)
 
     mouseModeBox->setLayout(mouseModeLayout);
 
+    auto escapeKeyBox = new QGroupBox(tr("Escape key"));
+    auto escapeKeyLayout = new QVBoxLayout();
+
+    escapeQuitsRadioButton = new QRadioButton(tr("Quit the reader"));
+    escapeCancelsModeRadioButton = new QRadioButton(tr("Cancel the active mode"));
+
+    escapeQuitsRadioButton->setToolTip(tr("Escape closes the reader, even while a mode is active."));
+
+    // Keep this list in sync with MainWindowViewer::cancelActiveMode(), which implements the order.
+    //: Tooltip listing the order in which modes are cancelled. Only the first
+    //: active mode in the list is cancelled per Escape keypress.
+    escapeCancelsModeRadioButton->setToolTip(tr("Escape cancels the first of these that is active:\n"
+                                                "\n"
+                                                "1. Magnifying glass\n"
+                                                "2. Dictionary\n"
+                                                "3. Go to page bar\n"
+                                                "4. Fullscreen\n"
+                                                "\n"
+                                                "If none is active, Escape does nothing."));
+
+    escapeKeyLayout->addWidget(escapeQuitsRadioButton);
+    escapeKeyLayout->addWidget(escapeCancelsModeRadioButton);
+
+    escapeKeyBox->setLayout(escapeKeyLayout);
+    addShortcutsSection(escapeKeyBox);
+
     layoutGeneral->addWidget(pathBox);
     layoutGeneral->addWidget(languageBox);
     layoutGeneral->addWidget(displayBox);
-    layoutGeneral->addWidget(slideSizeBox);
+    layoutGeneral->addWidget(magnifyingGlassBox);
     // layoutGeneral->addWidget(fitBox);
-    layoutGeneral->addWidget(colorBox);
     layoutGeneral->addWidget(scrollBox);
     layoutGeneral->addWidget(mouseModeBox);
-    layoutGeneral->addWidget(shortcutsBox);
     layoutGeneral->addStretch();
 
     // GENERAL END ---------------------------------------
@@ -141,6 +177,7 @@ OptionsDialog::OptionsDialog(QWidget *parent)
     disableShowOnMouseOver = new QCheckBox(tr("Disable mouse over activation"));
 
     layoutFlow->addWidget(gl);
+    layoutFlow->addWidget(slideSizeBox);
 
     layoutFlow->addWidget(quickNavi);
     layoutFlow->addWidget(disableShowOnMouseOver);
@@ -248,15 +285,17 @@ OptionsDialog::OptionsDialog(QWidget *parent)
             []() { return ThemeManager::instance().getCurrentTheme().sourceJson; },
             [](const QJsonObject &json) { ThemeManager::instance().setTheme(makeTheme(json)); },
             this);
+    pageAppearance->addSection(colorBox);
 
     // APPEARANCE END ------------------------------------
 
-    tabWidget->addTab(pageGeneral, tr("General"));
-    tabWidget->addTab(pageFlow, tr("Page Flow"));
-    tabWidget->addTab(pageImage, tr("Image adjustment"));
-    tabWidget->addTab(pageAppearance, tr("Appearance"));
+    settingsWidget->addPage(pageGeneral, tr("General"));
+    settingsWidget->addPage(pageFlow, tr("Page Flow"));
+    settingsWidget->addPage(pageImage, tr("Image adjustment"));
+    settingsWidget->addPage(pageAppearance, tr("Appearance"));
+    settingsWidget->addPage(shortcutsPage, shortcutsPage->windowTitle());
 
-    layout->addWidget(tabWidget);
+    layout->addWidget(settingsWidget);
 
     auto buttons = new QHBoxLayout();
     buttons->addStretch();
@@ -270,8 +309,6 @@ OptionsDialog::OptionsDialog(QWidget *parent)
 
     setModal(true);
     setWindowTitle(tr("Options"));
-
-    this->layout()->setSizeConstraint(QLayout::SetFixedSize);
 
     initTheme(this);
 }
@@ -312,6 +349,10 @@ void OptionsDialog::saveOptions()
 
     Configuration::getConfiguration().setShowTimeInInformation(showTimeInInformationLabel->isChecked());
 
+    Configuration::getConfiguration().setMagnifyingGlassCircular(circularMagnifyingGlass->isChecked());
+    Configuration::getConfiguration().setMagnifyingGlassRing(magnifyingGlassRing->isChecked());
+    Configuration::getConfiguration().setMagnifyingGlassEdgeEase(magnifyingGlassEdgeEase->isChecked());
+
     if (!backgroundColorFollowsTheme) {
         settings->setValue(BACKGROUND_COLOR, currentColor);
     } else {
@@ -336,6 +377,9 @@ void OptionsDialog::saveOptions()
         mouseMode = HotAreas;
     }
     Configuration::getConfiguration().setMouseMode(mouseMode);
+
+    Configuration::getConfiguration().setEscapeKeyBehavior(
+            escapeCancelsModeRadioButton->isChecked() ? EscapeCancelsMode : EscapeQuits);
 
     Configuration::getConfiguration().setScalingMethod(static_cast<ScaleMethod>(scalingMethodCombo->currentIndex()));
     emit changedImageOptions();
@@ -364,6 +408,11 @@ void OptionsDialog::restoreOptions(QSettings *settings)
     languageCombo->setCurrentIndex(languageIndex);
 
     showTimeInInformationLabel->setChecked(Configuration::getConfiguration().getShowTimeInInformation());
+
+    circularMagnifyingGlass->setChecked(Configuration::getConfiguration().getMagnifyingGlassCircular());
+    magnifyingGlassRing->setChecked(Configuration::getConfiguration().getMagnifyingGlassRing());
+    magnifyingGlassRing->setEnabled(circularMagnifyingGlass->isChecked());
+    magnifyingGlassEdgeEase->setChecked(Configuration::getConfiguration().getMagnifyingGlassEdgeEase());
 
     backgroundColorFollowsTheme = !settings->contains(BACKGROUND_COLOR);
     updateColor(backgroundColorFollowsTheme
@@ -409,6 +458,11 @@ void OptionsDialog::restoreOptions(QSettings *settings)
         hotAreasMouseModeRadioButton->setChecked(true);
         break;
     }
+
+    if (Configuration::getConfiguration().getEscapeKeyBehavior() == EscapeCancelsMode)
+        escapeCancelsModeRadioButton->setChecked(true);
+    else
+        escapeQuitsRadioButton->setChecked(true);
 }
 
 void OptionsDialog::updateColor(const QColor &color)

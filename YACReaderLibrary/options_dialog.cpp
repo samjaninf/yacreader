@@ -7,6 +7,7 @@
 #include "theme_manager.h"
 #include "yacreader_3d_flow_config_widget.h"
 #include "yacreader_global_gui.h"
+#include "yacreader_settings_widget.h"
 
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -14,7 +15,6 @@
 #include <QLayout>
 #include <QMessageBox>
 #include <QSettings>
-#include <QTabWidget>
 #include <QVBoxLayout>
 
 FlowType flowType = Strip;
@@ -29,12 +29,13 @@ OptionsDialog::OptionsDialog(QWidget *parent)
 
     auto appearanceW = createAppearanceTab();
 
-    auto tabWidget = new QTabWidget();
-    tabWidget->addTab(generalW, tr("General"));
-    tabWidget->addTab(librariesW, tr("Libraries"));
-    tabWidget->addTab(comicFlowW, tr("Comic Flow"));
-    tabWidget->addTab(gridViewW, tr("Grid view"));
-    tabWidget->addTab(appearanceW, tr("Appearance"));
+    auto settingsWidget = new YACReaderSettingsWidget();
+    settingsWidget->addPage(generalW, tr("General"));
+    settingsWidget->addPage(librariesW, tr("Libraries"));
+    settingsWidget->addPage(comicFlowW, tr("Comic Flow"));
+    settingsWidget->addPage(gridViewW, tr("Grid view"));
+    settingsWidget->addPage(appearanceW, tr("Appearance"));
+    settingsWidget->addPage(shortcutsPage, shortcutsPage->windowTitle());
 
     auto buttons = new QHBoxLayout();
     buttons->addStretch();
@@ -43,13 +44,11 @@ OptionsDialog::OptionsDialog(QWidget *parent)
     buttons->addWidget(cancel);
 
     auto layout = new QVBoxLayout(this);
-    layout->addWidget(tabWidget);
+    layout->addWidget(settingsWidget);
     layout->addLayout(buttons);
     setLayout(layout);
     setModal(true);
     setWindowTitle(tr("Options"));
-
-    this->layout()->setSizeConstraint(QLayout::SetFixedSize);
 }
 
 void OptionsDialog::editApiKey()
@@ -253,7 +252,6 @@ QWidget *OptionsDialog::createGeneralTab()
     auto generalLayout = new QVBoxLayout();
     generalLayout->addWidget(languageBox);
     generalLayout->addWidget(trayIconBox);
-    generalLayout->addWidget(shortcutsBox);
     generalLayout->addWidget(apiKeyBox);
     generalLayout->addWidget(comicInfoXMLBox);
     generalLayout->addWidget(recentlyAddedBox);
@@ -332,10 +330,14 @@ QWidget *OptionsDialog::createLibrariesTab()
     librariesBoxLayout->addWidget(updateLibrariesAtCertainTimeCheck);
     librariesBoxLayout->addLayout(updateLibrariesAtCertainTimeLayout);
 
-    librariesBoxLayout->addWidget(new QLabel(tr("WARNING! During library updates writes to the database are disabled!\n"
-                                                "Don't schedule updates while you may be using the app actively.\n"
-                                                "During automatic updates the app will block some of the actions until the update is finished.\n"
-                                                "To stop an automatic update tap on the loading indicator next to the Libraries title.")));
+    // Without word wrapping this label is the widest widget in the whole dialog, and because
+    // QStackedWidget hints at the width of its widest page it would size every other section too.
+    auto updatesWarningLabel = new QLabel(tr("WARNING! During library updates writes to the database are disabled!\n"
+                                             "Don't schedule updates while you may be using the app actively.\n"
+                                             "During automatic updates the app will block some of the actions until the update is finished.\n"
+                                             "To stop an automatic update tap on the loading indicator next to the Libraries title."));
+    updatesWarningLabel->setWordWrap(true);
+    librariesBoxLayout->addWidget(updatesWarningLabel);
 
     auto librariesBox = new QGroupBox(tr("Libraries"));
     librariesBox->setLayout(librariesBoxLayout);

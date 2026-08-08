@@ -19,8 +19,43 @@
 #include <QKeyEvent>
 #include <QMessageBox>
 #include <QPainter>
+#include <QPinchGesture>
 #include <QPropertyAnimation>
 #include <QScrollBar>
+
+#include <cmath>
+
+#ifdef Q_OS_MACOS
+#include <ApplicationServices/ApplicationServices.h>
+#endif
+
+namespace {
+// QCursor::setPos moves the pointer by synthesizing a mouse event and injecting
+// it into the HID event stream (QCocoaCursor::setPos -> CGEventPost). macOS
+// gates that behind the accessibility "control this computer" permission, so on
+// a machine that hasn't granted it the call is silently denied and the pointer
+// never moves, while the user gets an unexplained permission request.
+//
+// CGWarpMouseCursorPosition repositions the pointer without injecting an event
+// and needs no permission. It doesn't deliver a mouse move to the application,
+// which suits the only caller here: the point is to reposition the pointer
+// *without* triggering the move handling that would hide the widget again.
+//
+// Reported upstream as https://qt-project.atlassian.net/browse/QTBUG-148709.
+// If Qt switches QCocoaCursor::setPos to the warp, this can go back to being a
+// plain QCursor::setPos call once the fixed version is the minimum supported.
+void moveCursorTo(const QPoint &globalPos)
+{
+#ifdef Q_OS_MACOS
+    CGWarpMouseCursorPosition(CGPointMake(globalPos.x(), globalPos.y()));
+    // Warping leaves a short interval where physical mouse movement is filtered
+    // out; re-associating ends it so the next movement registers immediately.
+    CGAssociateMouseAndMouseCursorPosition(true);
+#else
+    QCursor::setPos(globalPos);
+#endif
+}
+}
 
 Viewer::Viewer(QWidget *parent)
     : QScrollArea(parent),
@@ -38,8 +73,34 @@ Viewer::Viewer(QWidget *parent)
       shouldOpenPrevious(false),
       magnifyingGlassShown(false),
       restoreMagnifyingGlass(false),
+      pinchStartZoom(100),
+      zoomAnchorNormX(0.5),
+      zoomAnchorNormY(0.5),
+      zoomHud(nullptr),
+      zoomHudHideTimer(nullptr),
+      zoomPreviewFinishTimer(nullptr),
       mouseHandler(std::make_unique<YACReader::MouseHandler>(this))
 {
+    grabGesture(Qt::PinchGesture);
+
+    zoomHud = new QLabel(this);
+    zoomHud->setAlignment(Qt::AlignCenter);
+    zoomHud->setAttribute(Qt::WA_TransparentForMouseEvents);
+    zoomHud->setTextFormat(Qt::RichText);
+    zoomHud->setStyleSheet(
+            "background-color: rgba(0, 0, 0, 153); border-radius: 3px;");
+    zoomHud->setFixedSize(100, 60);
+    zoomHud->hide();
+
+    zoomHudHideTimer = new QTimer(this);
+    zoomHudHideTimer->setSingleShot(true);
+    connect(zoomHudHideTimer, &QTimer::timeout, zoomHud, &QWidget::hide);
+
+    zoomPreviewFinishTimer = new QTimer(this);
+    zoomPreviewFinishTimer->setSingleShot(true);
+    zoomPreviewFinishTimer->setInterval(250);
+    connect(zoomPreviewFinishTimer, &QTimer::timeout, this, &Viewer::renderFinalZoomImage);
+
     translator = new YACReaderTranslator(this);
     translator->hide();
     translatorAnimation = new QPropertyAnimation(translator, "pos");
@@ -78,7 +139,11 @@ Viewer::Viewer(QWidget *parent)
     mglass = new MagnifyingGlass(
             Configuration::getConfiguration().getMagnifyingGlassSize(),
             Configuration::getConfiguration().getMagnifyingGlassZoom(),
+            Configuration::getConfiguration().getMagnifyingGlassCircular(),
+            Configuration::getConfiguration().getMagnifyingGlassRing(),
             this);
+
+    magnifierEdgeEase = Configuration::getConfiguration().getMagnifyingGlassEdgeEase();
 
     connect(mglass, &MagnifyingGlass::sizeChanged, this, [](QSize size) {
         Configuration::getConfiguration().setMagnifyingGlassSize(size);
@@ -435,6 +500,8 @@ void Viewer::updatePage()
 
 void Viewer::updateContentSize()
 {
+    cancelZoomPreview();
+
     // there is an image to resize
     if (currentPage != nullptr && !currentPage->isNull()) {
         QSize pagefit = currentPage->size();
@@ -764,11 +831,51 @@ void Viewer::wheelEvent(QWheelEvent *event)
         return;
     }
 
+    // Check the modifier before choosing the regular mouse/trackpad scroll path so
+    // high-resolution devices with pixelDelta (notably on macOS) zoom as well. Qt maps
+    // ControlModifier to Command on macOS unless the application opts out of that mapping.
+    if (event->modifiers() == Qt::ControlModifier && event->angleDelta().y() != 0) {
+        wheelEventZoom(event);
+        return;
+    }
+
+    wheelZoomAccumulator = 0;
+
     if (!event->pixelDelta().isNull()) {
         wheelEventTrackpad(event);
     } else {
         wheelEventMouse(event);
     }
+}
+
+void Viewer::wheelEventZoom(QWheelEvent *event)
+{
+    static constexpr int wheelStep = 120;
+    static constexpr int zoomStep = 10;
+    static constexpr qint64 accumulatorResetMs = 400;
+    static constexpr int hudTimeoutMs = 500;
+
+    horizontalScroller->stop();
+    verticalScroller->stop();
+    wheelStop = false;
+
+    if (!wheelZoomTimer.isValid() || wheelZoomTimer.elapsed() > accumulatorResetMs) {
+        wheelZoomAccumulator = 0;
+    }
+    wheelZoomTimer.restart();
+
+    wheelZoomAccumulator += event->angleDelta().y();
+    const int steps = wheelZoomAccumulator / wheelStep;
+    wheelZoomAccumulator -= steps * wheelStep;
+
+    if (steps != 0) {
+        captureZoomAnchor();
+        if (applyZoomAtAnchor(zoom + steps * zoomStep)) {
+            zoomHudHideTimer->start(hudTimeoutMs);
+        }
+    }
+
+    event->accept();
 }
 
 void Viewer::wheelEventMouse(QWheelEvent *event)
@@ -922,8 +1029,115 @@ QList<int> Viewer::currentVisiblePages()
     return pages;
 }
 
+namespace {
+// The magnifier edge easing pushes the loupe's sampled center outward toward the viewport
+// edges so edge content is reachable with less cursor travel. Crucially the push is bounded
+// by the loupe's own half-size, which (a) keeps the cursor's true point inside the loupe
+// view and (b) scales the effect with loupe size: a minimum-size loupe is nearly linear, a
+// large one eases strongly.
+
+// Fraction of the half-axis at which the easing reaches full displacement. Smaller = the
+// effect ramps in sooner and saturates before the cursor reaches the edge, so edge content
+// is reachable well before the pointer is jammed against the border; beyond this the loupe
+// is already at full reach (still capped at the loupe half-size, so the cursor point stays
+// in view). 1.0 would only reach full push exactly at the edge.
+constexpr double edgeReach = 0.4;
+
+// Overall strength of the push, as a fraction of the loupe half-extent (its natural cap). 1.0
+// pushes the sampled center by up to a full half-loupe at the edge; lower values keep the
+// content swim gentler so it tracks the cursor more closely. The cursor's point stays in view
+// for any value in (0, 1].
+constexpr double edgeStrength = 0.3;
+
+// Smoothstep ramp: 0 at the viewport center (1:1 there, and zero slope so it stays linear
+// near the middle), rising to 1 by edgeReach (and held there to the edge). Multiplied by the
+// loupe half-extent to give the outward displacement.
+double edgeRamp(double u) // u = |normalized cursor offset from center|, in [0, 1]
+{
+    u = qBound(0.0, u / edgeReach, 1.0);
+    return u * u * (3.0 - 2.0 * u);
+}
+
+// The edge easing is canceled on an axis only once the page is letterboxed by at least this
+// fraction of its own size on that axis. Below it — a thin margin, an exact fit, or a page
+// that overflows the viewport — the curve still applies, so the effect stays visible for
+// pages that nearly fill the view instead of vanishing the instant the page is a hair smaller
+// than the viewport. Above it the background beside the page is wide enough that easing would
+// mostly reveal that background, so the axis is left at 1:1.
+constexpr double minLetterboxFraction = 0.10;
+}
+
+QPoint Viewer::easeViewerPos(const QPoint &viewerPos, const QSize &glassSize, bool circular) const
+{
+    if (!magnifierEdgeEase) {
+        return viewerPos;
+    }
+    // Reference frame = the viewport (the visible scroll region the page is drawn in), not the
+    // top-level window. The window includes the toolbar/chrome, whose height inflates the
+    // frame well beyond the page and pushes the "center" off, so the loupe eases too hard. In
+    // fullscreen the viewport already fills the screen, so this matches the old behavior there.
+    const double vpW = viewport()->width();
+    const double vpH = viewport()->height();
+    if (vpW <= 1.0 || vpH <= 1.0) {
+        return viewerPos;
+    }
+
+    // Normalized cursor offset from the viewport center, per axis in [-1, 1].
+    const double tx = qBound(-1.0, (viewerPos.x() - vpW / 2.0) / (vpW / 2.0), 1.0);
+    const double ty = qBound(-1.0, (viewerPos.y() - vpH / 2.0) / (vpH / 2.0), 1.0);
+
+    // Easing helps on an axis where there is off-page content to bring toward the cursor. A page
+    // that overflows the viewport always qualifies; a letterboxed page qualifies until the
+    // margin beside it grows large enough that easing would mostly reveal background. Cancel the
+    // curve on an axis only once the letterbox reaches minLetterboxFraction of the page's size on
+    // that axis, so a page that nearly fills the viewport (thin margin or exact fit) still eases
+    // instead of dropping the effect the instant the page is a hair smaller than the view.
+    bool easeX = true;
+    bool easeY = true;
+    if (const QWidget *w = widget()) {
+        double pageW = w->width();
+        const double pageH = w->height();
+        if (continuousScroll && w == continuousWidget && continuousViewModel != nullptr) {
+            // The continuous widget fills the viewport width with each page centered inside it,
+            // so the page under the cursor — not the widget — is the horizontal extent. The
+            // document is contiguous vertically, so the widget height is the vertical extent.
+            const int cwY = viewerPos.y() + verticalScrollBar()->sliderPosition();
+            const int idx = qBound(0, continuousViewModel->pageAtY(cwY), continuousViewModel->numPages() - 1);
+            pageW = continuousViewModel->scaledPageSize(idx).width();
+        }
+        // Letterbox = how far the viewport exceeds the page on the axis; keep easing until it
+        // reaches minLetterboxFraction of the page dimension (overflow and exact fit stay on the
+        // "ease" side).
+        easeX = (vpW - pageW) < minLetterboxFraction * pageW;
+        easeY = (vpH - pageH) < minLetterboxFraction * pageH;
+    }
+
+    // Outward displacement, capped per axis at the loupe half-extent (the loupe's "reach") and
+    // scaled by edgeStrength. The cap is what guarantees the cursor's point never leaves the
+    // loupe view, and what makes a small loupe nearly linear while a large loupe eases hard.
+    double dx = easeX ? edgeStrength * (glassSize.width() / 2.0) * edgeRamp(qAbs(tx)) * (tx < 0.0 ? -1.0 : 1.0) : 0.0;
+    double dy = easeY ? edgeStrength * (glassSize.height() / 2.0) * edgeRamp(qAbs(ty)) * (ty < 0.0 ? -1.0 : 1.0) : 0.0;
+
+    if (circular) {
+        // A round loupe's limit is radial (Pythagorean): the displacement vector may not
+        // exceed the radius, rather than being capped independently on each axis.
+        const double radius = qMax(glassSize.width(), glassSize.height()) / 2.0;
+        const double mag = std::sqrt(dx * dx + dy * dy);
+        if (mag > radius && mag > 0.0) {
+            dx *= radius / mag;
+            dy *= radius / mag;
+        }
+    }
+
+    // The displacement is a translation, so add it back in the caller's (viewport) frame.
+    return QPoint(qRound(viewerPos.x() + dx), qRound(viewerPos.y() + dy));
+}
+
 QImage Viewer::grabMagnifiedRegion(const QPoint &viewerPos, const QSize &glassSize, float zoomLevel) const
 {
+    // viewerPos is expected already eased (see MagnifyingGlass::updateImage / easeViewerPos):
+    // this samples the loupe's *content*, which swims a little toward the edge relative to the
+    // loupe widget (which itself follows the cursor).
     const int glassW = glassSize.width();
     const int glassH = glassSize.height();
     const int zoomW = static_cast<int>(glassW * zoomLevel);
@@ -1070,8 +1284,12 @@ QImage Viewer::grabMagnifiedRegion(const QPoint &viewerPos, const QSize &glassSi
     }
 
     if (outImage) {
+        // The magnified image is kept at source resolution (device pixel ratio 1),
+        // matching the in-bounds path below. Do NOT set a >1 device pixel ratio here:
+        // a QPainter draws in logical coordinates, so painting the DPR-1 source crop
+        // onto a DPR>1 image would scale the content up by the ratio (and clip it),
+        // producing a sudden magnification jump at the image edges on HiDPI displays.
         QImage img(zoomWScaled, zoomHScaled, QImage::Format_RGB32);
-        img.setDevicePixelRatio(devicePixelRatioF());
         img.fill(bgColor);
         if (zw > 0 && zh > 0) {
             QPainter painter(&img);
@@ -1159,6 +1377,16 @@ void Viewer::translatorSwitch()
     translator->isVisible() ? animateHideTranslator() : animateShowTranslator();
 }
 
+bool Viewer::translatorIsVisible() const
+{
+    return translator->isVisible();
+}
+
+bool Viewer::goToFlowIsVisible() const
+{
+    return goToFlow->isVisible();
+}
+
 void Viewer::showGoToFlow()
 {
     if (render->hasLoadedComic()) {
@@ -1215,7 +1443,7 @@ void Viewer::moveCursoToGoToFlow()
         cursorX = x1 + 10;
     if (cursorX >= x2)
         cursorX = x2 - 10;
-    cursor().setPos(mapToGlobal(QPoint(cursorX, cursorY)));
+    moveCursorTo(mapToGlobal(QPoint(cursorX, cursorY)));
     hideCursorTimer->stop();
     showCursor();
 }
@@ -1663,11 +1891,136 @@ bool Viewer::eventFilter(QObject *obj, QEvent *event)
     return QScrollArea::eventFilter(obj, event);
 }
 
+bool Viewer::event(QEvent *event)
+{
+    if (event->type() == QEvent::Gesture) {
+        return gestureEvent(static_cast<QGestureEvent *>(event));
+    }
+    return QScrollArea::event(event);
+}
+
+void Viewer::captureZoomAnchor()
+{
+    zoomAnchorViewport = viewport()->mapFromGlobal(QCursor::pos());
+    if (content->width() > 0 && content->height() > 0) {
+        const QPoint cursorInContent = content->mapFrom(viewport(), zoomAnchorViewport);
+        zoomAnchorNormX = std::clamp(double(cursorInContent.x()) / content->width(), 0.0, 1.0);
+        zoomAnchorNormY = std::clamp(double(cursorInContent.y()) / content->height(), 0.0, 1.0);
+    } else {
+        zoomAnchorNormX = 0.5;
+        zoomAnchorNormY = 0.5;
+    }
+}
+
+bool Viewer::applyZoomAtAnchor(int newZoom)
+{
+    newZoom = std::clamp(newZoom, 30, 500);
+    if (newZoom == zoom) {
+        return false;
+    }
+
+    if (continuousScroll) {
+        updateZoomRatio(newZoom);
+    } else {
+        const int previousZoom = zoom;
+        zoom = newZoom;
+
+        if (!zoomPreviewActive) {
+            // Reuse the current high-quality pixmap while the label follows the requested
+            // geometry. The normal renderer replaces it after the interaction pauses.
+            scaledContentsBeforeZoomPreview = content->hasScaledContents();
+            zoomPreviewBaseSize = content->size();
+            zoomPreviewBaseZoom = previousZoom;
+            content->setScaledContents(true);
+            zoomPreviewActive = true;
+        }
+
+        const double scale = static_cast<double>(newZoom) / zoomPreviewBaseZoom;
+        content->resize(std::max(1, qRound(zoomPreviewBaseSize.width() * scale)),
+                        std::max(1, qRound(zoomPreviewBaseSize.height() * scale)));
+        restoreZoomAnchor();
+        zoomPreviewFinishTimer->start();
+    }
+
+    zoomHud->setText(QStringLiteral("<span style=\"color:white; font-size:12px;\">%1%</span>").arg(zoom));
+    positionZoomHud();
+    zoomHud->show();
+
+    emit zoomUpdated(zoom);
+    return true;
+}
+
+void Viewer::restoreZoomAnchor()
+{
+    const int alignX = std::max(0, (viewport()->width() - content->width()) / 2);
+    const int alignY = std::max(0, (viewport()->height() - content->height()) / 2);
+    const int targetH = std::lround(zoomAnchorNormX * content->width()) + alignX - zoomAnchorViewport.x();
+    const int targetV = std::lround(zoomAnchorNormY * content->height()) + alignY - zoomAnchorViewport.y();
+    horizontalScrollBar()->setValue(targetH);
+    verticalScrollBar()->setValue(targetV);
+}
+
+void Viewer::cancelZoomPreview()
+{
+    if (!zoomPreviewActive) {
+        return;
+    }
+
+    zoomPreviewFinishTimer->stop();
+    content->setScaledContents(scaledContentsBeforeZoomPreview);
+    zoomPreviewActive = false;
+}
+
+void Viewer::renderFinalZoomImage()
+{
+    if (!zoomPreviewActive) {
+        return;
+    }
+
+    cancelZoomPreview();
+    updateContentSize();
+    restoreZoomAnchor();
+}
+
+void Viewer::positionZoomHud()
+{
+    const int margin = 16;
+    zoomHud->move(width() - zoomHud->width() - margin,
+                  height() - zoomHud->height() - margin);
+    zoomHud->raise();
+}
+
+bool Viewer::gestureEvent(QGestureEvent *event)
+{
+    if (QGesture *g = event->gesture(Qt::PinchGesture)) {
+        auto *pinch = static_cast<QPinchGesture *>(g);
+        if (!render->hasLoadedComic()) {
+            event->accept(pinch);
+            return true;
+        }
+        if (pinch->state() == Qt::GestureStarted) {
+            zoomHudHideTimer->stop();
+            pinchStartZoom = zoom;
+            captureZoomAnchor();
+        }
+        int newZoom = std::clamp<int>(std::lround(pinchStartZoom * pinch->totalScaleFactor()), 30, 500);
+        applyZoomAtAnchor(newZoom);
+        if (pinch->state() == Qt::GestureFinished || pinch->state() == Qt::GestureCanceled) {
+            renderFinalZoomImage();
+            zoomHud->hide();
+        }
+        event->accept(pinch);
+        return true;
+    }
+    return QScrollArea::event(event);
+}
+
 void Viewer::setActiveWidget(QWidget *w)
 {
     if (widget() == w) {
         return;
     }
+    cancelZoomPreview();
     verticalScrollBar()->blockSignals(true);
     takeWidget();
     const bool isContinuous = (w == continuousWidget);
@@ -1696,6 +2049,10 @@ bool Viewer::getIsMangaMode()
 void Viewer::updateConfig(QSettings *settings)
 {
     goToFlow->updateConfig(settings);
+
+    mglass->setCircular(Configuration::getConfiguration().getMagnifyingGlassCircular());
+    mglass->setRing(Configuration::getConfiguration().getMagnifyingGlassRing());
+    magnifierEdgeEase = Configuration::getConfiguration().getMagnifyingGlassEdgeEase();
 
     QPalette palette;
     palette.setColor(backgroundRole(), Configuration::getConfiguration().getBackgroundColor(theme.viewer.defaultBackgroundColor));

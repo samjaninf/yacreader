@@ -342,6 +342,7 @@ struct SearchLineEditTheme {
     QString lineEditQSS;
     QString searchLabelQSS;
     QString clearButtonQSS;
+    QColor iconColor;
     QPixmap searchIcon;
     QPixmap clearIcon;
 };
@@ -401,8 +402,10 @@ struct ServerConfigDialogTheme {
     QString titleLabelQSS;
     QString qrMessageLabelQSS;
     QString propagandaLabelQSS;
-    QString labelQSS;
+    QString textLabelQSS;
+    QString secondaryLabelQSS;
     QString checkBoxQSS;
+    QColor linkColor;
     QColor qrBackgroundColor;
     QColor qrForegroundColor;
     QPixmap backgroundDecoration;

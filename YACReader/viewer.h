@@ -8,6 +8,8 @@
 #include <QAction>
 #include <QByteArray>
 #include <QCloseEvent>
+#include <QElapsedTimer>
+#include <QGestureEvent>
 #include <QLabel>
 #include <QList>
 #include <QMainWindow>
@@ -18,6 +20,7 @@
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QSettings>
+#include <QSize>
 #include <QTimer>
 #include <QWheelEvent>
 
@@ -85,6 +88,8 @@ public slots:
     void rotateLeft();
     void rotateRight();
     bool magnifyingGlassIsVisible() const { return magnifyingGlassShown; }
+    bool translatorIsVisible() const;
+    bool goToFlowIsVisible() const;
     void setBookmark(bool);
     void save();
     void doublePageSwitch();
@@ -176,13 +181,43 @@ private:
     bool magnifyingGlassShown;
     bool restoreMagnifyingGlass;
     void setMagnifyingGlassShown(bool shown);
+    //! When true, the loupe's sampled-region center is pushed non-linearly toward the
+    //! viewport edges so edge content is reachable with less cursor travel.
+    //! The push is applied per axis until the page is letterboxed by more than a fraction of
+    //! its own size on that axis (a thin margin, an exact fit, or an overflowing page still
+    //! ease); past that threshold the background beside the page is wide enough that easing
+    //! would mostly reveal it, so the axis is left at 1:1.
+    bool magnifierEdgeEase;
 
     //! Event handlers:
     void resizeEvent(QResizeEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
     void wheelEventMouse(QWheelEvent *event);
     void wheelEventTrackpad(QWheelEvent *event);
+    void wheelEventZoom(QWheelEvent *event);
     void mouseMoveEvent(QMouseEvent *event) override;
+    bool event(QEvent *event) override;
+    bool gestureEvent(QGestureEvent *event);
+    void captureZoomAnchor();
+    bool applyZoomAtAnchor(int newZoom);
+    void restoreZoomAnchor();
+    void cancelZoomPreview();
+    void renderFinalZoomImage();
+    void positionZoomHud();
+
+    int pinchStartZoom;
+    QPoint zoomAnchorViewport;
+    double zoomAnchorNormX;
+    double zoomAnchorNormY;
+    QLabel *zoomHud;
+    QTimer *zoomHudHideTimer;
+    QTimer *zoomPreviewFinishTimer;
+    bool zoomPreviewActive = false;
+    bool scaledContentsBeforeZoomPreview = false;
+    QSize zoomPreviewBaseSize;
+    int zoomPreviewBaseZoom = 100;
+    int wheelZoomAccumulator = 0;
+    QElapsedTimer wheelZoomTimer;
 
     int verticalScrollStep() const;
     int horizontalScrollStep() const;
@@ -231,6 +266,13 @@ public:
     QByteArray rawPage(int page) const;
     QList<int> currentVisiblePages();
     QImage grabMagnifiedRegion(const QPoint &viewerPos, const QSize &glassSize, float zoomLevel) const;
+    //! Eases a cursor position (viewport coords) toward the edges to give the loupe's
+    //! *content* its sampled-region center, normalized against the viewport. The outward push
+    //! is bounded by the loupe's own half-size (per-axis for a rect, radially for a circle),
+    //! so the cursor's point stays inside the loupe view and the strength scales with loupe
+    //! size; it is skipped on an axis only where the page is letterboxed beyond a fraction of
+    //! its own size.
+    QPoint easeViewerPos(const QPoint &viewerPos, const QSize &glassSize, bool circular) const;
     // Comic * getComic(){return comic;}
     const BookmarksDialog *getBookmarksDialog() { return bd; }
     // returns the current index starting in 1 [1,nPages]

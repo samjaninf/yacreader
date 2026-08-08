@@ -99,7 +99,10 @@ void YACReader::MouseHandler::mouseMoveEvent(QMouseEvent *event)
     auto position = event->position();
 
     if (viewer->magnifyingGlassShown)
-        viewer->mglass->move(static_cast<int>(position.x() - float(viewer->mglass->width()) / 2), static_cast<int>(position.y() - float(viewer->mglass->height()) / 2));
+        // Route through updateImage so the loupe uses the same eased content center and
+        // on-screen-clamped widget position as its own mouseMoveEvent handler, instead of
+        // snapping to the raw cursor (which fought the easing near the edges).
+        viewer->mglass->updateImage(static_cast<int>(position.x()), static_cast<int>(position.y()));
 
     if (viewer->render->hasLoadedComic()) {
         if (viewer->showGoToFlowAnimation->state() != QPropertyAnimation::Running) {
@@ -109,7 +112,9 @@ void YACReader::MouseHandler::mouseMoveEvent(QMouseEvent *event)
                     if (gtfPos.y() < 0 || gtfPos.x() < 0 || gtfPos.x() > viewer->goToFlow->width()) // TODO this extra check is for Mavericks (mouseMove over goToFlowGL seems to be broken)
                         viewer->animateHideGoToFlow();
                     // goToFlow->hide();
-                } else {
+                } else if (!viewer->magnifyingGlassShown) {
+                    // Don't pop up the bottom page-selection bar while the
+                    // magnifying glass is active: it prevents magnifying that area.
                     int umbral = (viewer->width() - viewer->goToFlow->width()) / 2;
                     if ((position.y() > viewer->height() - 15) && (position.x() > umbral) && (position.x() < viewer->width() - umbral)) {
 

@@ -28,6 +28,7 @@
 class QTreeView;
 class QDirModel;
 class QAction;
+class QMenu;
 class QToolBar;
 class QComboBox;
 class QThread;
@@ -87,6 +88,7 @@ class RecentVisibilityCoordinator;
 namespace YACReader {
 class TrayIconController;
 class XMLInfoLibraryScanner;
+class ComicInfoRepairer;
 }
 
 #include "comic_db.h"
@@ -110,6 +112,7 @@ public:
     AddLibraryDialog *addLibraryDialog;
     LibraryCreator *libraryCreator;
     XMLInfoLibraryScanner *xmlInfoLibraryScanner;
+    ComicInfoRepairer *comicInfoRepairer;
     HelpAboutDialog *had;
     RenameLibraryDialog *renameLibraryDialog;
     PropertiesDialog *propertiesDialog;
@@ -197,6 +200,12 @@ public:
     void doModels();
     void setupCoordinators();
     bool hasLoadedLibraryModels() const;
+    QMenu *createSearchMenu();
+    void applySearchQuery(const QString &query);
+    void setSearchInputEnabled(bool enabled);
+    void clearSearchInput(bool notify);
+    void focusSearchInput();
+    void showSearchSyntax();
 
     QString currentPath();
     QString currentFolderPath();
@@ -220,6 +229,7 @@ protected:
 
 public:
     LibraryWindow();
+    QString searchText() const;
 
 signals:
     void libraryUpgraded(const QString &libraryName);
@@ -239,6 +249,13 @@ public slots:
     void reloadCurrentLibrary();
     void openLastCreated();
     void updateLibrary();
+    void backupLibrary();
+    void restoreLibrary();
+    void startLibraryRestore(const QString &backupPath, bool allowInvalidCurrent = false, bool removeStaleLock = false);
+    void offerDatabaseRecovery(const QString &libraryName);
+    void startDatabaseSalvage(const QString &libraryName, bool removeStaleLock = false);
+    void repairLibrary();
+    void startLibraryRepair(bool removeStaleLock);
     // void deleteLibrary();
     void openContainingFolder();
     void setFolderAsNotCompleted();
@@ -256,12 +273,14 @@ public slots:
     void renameLibrary();
     void rescanLibraryForXMLInfo();
     void showLibraryInfo();
+    void openLibraryFolder();
     void rescanCurrentFolderForXMLInfo();
     void rescanFolderForXMLInfo(QModelIndex modelIndex);
     void rename(QString newName);
     void cancelCreating();
     void stopLibraryCreator();
     void stopXMLScanning();
+    void stopComicInfoRepair();
     void setRootIndex();
     void toggleFullScreen();
     void toNormal();

@@ -33,6 +33,10 @@ private:
 
     QCheckBox *showTimeInInformationLabel;
 
+    QCheckBox *circularMagnifyingGlass;
+    QCheckBox *magnifyingGlassRing;
+    QCheckBox *magnifyingGlassEdgeEase;
+
     QCheckBox *quickNavi;
     QCheckBox *disableShowOnMouseOver;
     QCheckBox *scaleCheckbox;
@@ -70,6 +74,9 @@ private:
     QRadioButton *normalMouseModeRadioButton;
     QRadioButton *leftRightNavigationMouseModeRadioButton;
     QRadioButton *hotAreasMouseModeRadioButton;
+
+    QRadioButton *escapeQuitsRadioButton;
+    QRadioButton *escapeCancelsModeRadioButton;
 
 public slots:
     void saveOptions() override;
