@@ -2,6 +2,11 @@
 
 Version counting is based on semantic versioning (Major.Feature.Patch)
 
+## 10.3.1
+
+### YACReader
+* Fix continuous vertical scroll mode shortcut not being saved.
+
 ## 10.3.0
 
 ### YACReaderLibrary
